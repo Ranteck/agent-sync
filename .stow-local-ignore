@@ -1,0 +1,8 @@
+^README.*
+^tests.*
+^sync-agents$
+^\.git$
+^\.github$
+^\.gitignore$
+.*__pycache__.*
+.*\.pyc$
