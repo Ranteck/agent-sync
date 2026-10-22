@@ -7,6 +7,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from config import SyncResult, read_object, atomic_write_json, safe_create_symlink
+from codex_sync import build_shared_rules, sync_shared_rules
 from native_codex import _mcp
 from plugin_sources import prepare_source
 
@@ -35,6 +36,8 @@ def _agy(binary, args, expect_json=False):
 def sync_antigravity(paths, state, dry_run=False):
     result = SyncResult()
     try:
+        sync_shared_rules(build_shared_rules(paths), paths.gemini_dir / "GEMINI.md", state,
+                          "gemini_rules_hash", "Antigravity", dry_run, result)
         config = paths.gemini_dir / "config"
         settings = read_object(paths.claude_dir / "settings.json")
         enabled = settings.get("enabledPlugins", {})

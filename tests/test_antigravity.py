@@ -3,6 +3,7 @@ Unit tests for Antigravity (~/.gemini) synchronization.
 """
 
 import json
+import hashlib
 import unittest
 from pathlib import Path
 from helpers import IsolatedEnvironmentTestCase
@@ -260,6 +261,146 @@ exit 2
         result = sync_antigravity(self.get_paths(), StateManager(self.get_paths()))
         self.assertTrue(result.success, result.errors)
         self.assertTrue(any("omit" in op.lower() for op in result.operations))
+
+
+class TestAntigravityRules(IsolatedEnvironmentTestCase):
+
+    def setUp(self):
+        super().setUp()
+        (self.claude_dir / "settings.json").write_text('{"enabledPlugins": {}}')
+        (self.claude_dir / "plugins").mkdir()
+        (self.claude_dir / "plugins/installed_plugins.json").write_text('{"plugins": {}}')
+        config = self.gemini_dir / "config"
+        config.mkdir()
+        (config / "skills.json").write_text('{"entries": []}')
+        (config / "mcp_config.json").write_text('{"mcpServers": {}}')
+        (self.claude_dir / "RTK.md").write_text("# RTK\nBe concise.\n")
+        for directory, filename, content in [
+            ("house-rules", "HOUSE-RULES.md", "# House Rules\nFollow conventions."),
+            ("ai-native-sdlc", "AI-NATIVE-SDLC.md", "# AI Native SDLC\nIntent -> Spec -> Plan."),
+        ]:
+            source = self.projects_dir / directory
+            source.mkdir()
+            (source / filename).write_text(content)
+        (self.claude_dir / "CLAUDE.md").write_text("@RTK.md\n# Workflow Rules\nAlways verify.\n")
+        self.target = self.gemini_dir / "GEMINI.md"
+        self.expected = (
+            "# RTK\nBe concise.\n\n"
+            "<!-- house-rules:start -->\n# House Rules\nFollow conventions.\n<!-- house-rules:end -->\n\n"
+            "<!-- ai-native-sdlc:start -->\n# AI Native SDLC\nIntent -> Spec -> Plan.\n<!-- ai-native-sdlc:end -->\n\n"
+            "<!-- claude-guidelines:start -->\n# Workflow Rules\nAlways verify.\n<!-- claude-guidelines:end -->\n"
+        )
+
+    def test_missing_rules_are_created_with_the_same_content_as_codex(self):
+        from antigravity_sync import sync_antigravity
+        from codex_sync import sync_codex
+        from state import StateManager
+
+        paths = self.get_paths()
+        state = StateManager(paths)
+        result = sync_antigravity(paths, state)
+        self.assertTrue(result.success, result.errors)
+        self.assertEqual(self.target.read_bytes(), self.expected.encode())
+        self.assertIn("Antigravity: reglas compartidas actualizadas.", result.operations)
+        self.assertEqual(state.load_state()["managed"]["gemini_rules_hash"],
+                         hashlib.sha256(self.expected.encode()).hexdigest())
+        codex = sync_codex(paths, state)
+        self.assertTrue(codex.success, codex.errors)
+        self.assertEqual((self.codex_dir / "AGENTS.md").read_bytes(), self.target.read_bytes())
+
+    def test_a_single_shared_part_is_adopted_without_a_hash(self):
+        from antigravity_sync import sync_antigravity
+        from state import StateManager
+
+        for part in self.expected.strip().split("\n\n"):
+            with self.subTest(part=part.splitlines()[0]):
+                state = StateManager(self.get_paths())
+                state.load_state().setdefault("managed", {}).pop("gemini_rules_hash", None)
+                self.target.write_text("\n" + part + "\n\n")
+                result = sync_antigravity(self.get_paths(), state)
+                self.assertTrue(result.success, result.errors)
+                self.assertEqual(self.target.read_text(), self.expected)
+                self.assertIn("Antigravity: reglas compartidas actualizadas.", result.operations)
+                self.assertIn("gemini_rules_hash", state.load_state()["managed"])
+
+    def test_custom_rules_without_a_hash_are_preserved_and_reported(self):
+        from antigravity_sync import sync_antigravity
+        from state import StateManager
+
+        custom = "# RTK\nBe concise.\n\nMy own instructions.\n"
+        self.target.write_text(custom)
+        state = StateManager(self.get_paths())
+        result = sync_antigravity(self.get_paths(), state)
+        self.assertTrue(result.success, result.errors)
+        self.assertEqual(self.target.read_text(), custom)
+        self.assertIn("Antigravity: GEMINI.md propio preservado; no coincide con una versión administrada.",
+                      result.operations)
+        self.assertNotIn("gemini_rules_hash", state.load_state()["managed"])
+
+    def test_managed_rules_are_updated_when_a_source_changes(self):
+        from antigravity_sync import sync_antigravity
+        from state import StateManager
+
+        paths = self.get_paths()
+        first = sync_antigravity(paths, StateManager(paths))
+        self.assertTrue(first.success, first.errors)
+        (self.claude_dir / "RTK.md").write_text("# RTK\nUpdated instructions.\n")
+        state = StateManager(paths)
+        result = sync_antigravity(paths, state)
+        self.assertTrue(result.success, result.errors)
+        updated = self.expected.replace("Be concise.", "Updated instructions.")
+        self.assertEqual(self.target.read_text(), updated)
+        self.assertIn("Antigravity: reglas compartidas actualizadas.", result.operations)
+        self.assertEqual(state.load_state()["managed"]["gemini_rules_hash"],
+                         hashlib.sha256(updated.encode()).hexdigest())
+
+    def test_local_edits_to_managed_rules_are_preserved(self):
+        from antigravity_sync import sync_antigravity
+        from state import StateManager
+
+        paths = self.get_paths()
+        first = sync_antigravity(paths, StateManager(paths))
+        self.assertTrue(first.success, first.errors)
+        custom = self.target.read_text() + "Local addition.\n"
+        self.target.write_text(custom)
+        result = sync_antigravity(paths, StateManager(paths))
+        self.assertTrue(result.success, result.errors)
+        self.assertEqual(self.target.read_text(), custom)
+        self.assertIn("Antigravity: GEMINI.md propio preservado; no coincide con una versión administrada.",
+                      result.operations)
+
+    def test_matching_rules_are_adopted_without_rewriting(self):
+        from antigravity_sync import sync_antigravity
+        from state import StateManager
+
+        self.target.write_text(self.expected)
+        before = self.target.stat().st_mtime_ns
+        state = StateManager(self.get_paths())
+        result = sync_antigravity(self.get_paths(), state)
+        self.assertTrue(result.success, result.errors)
+        self.assertEqual(self.target.stat().st_mtime_ns, before)
+        self.assertEqual(state.load_state()["managed"]["gemini_rules_hash"],
+                         hashlib.sha256(self.expected.encode()).hexdigest())
+        self.assertFalse(any("reglas compartidas" in op or "GEMINI.md" in op for op in result.operations))
+
+    def test_dry_run_reports_updates_without_writing_rules_or_hash(self):
+        from antigravity_sync import sync_antigravity
+        from state import StateManager
+
+        for current in [None, "# RTK\nBe concise.\n"]:
+            with self.subTest(current=current):
+                if current is not None:
+                    self.target.write_text(current)
+                state = StateManager(self.get_paths())
+                result = sync_antigravity(self.get_paths(), state, dry_run=True)
+                self.assertTrue(result.success, result.errors)
+                if current is None:
+                    self.assertFalse(self.target.exists())
+                else:
+                    self.assertEqual(self.target.read_text(), current)
+                self.assertIn("Antigravity: reglas compartidas actualizadas.", result.operations)
+                self.assertNotIn("gemini_rules_hash", state.load_state().get("managed", {}))
+                self.assertFalse(state.state_file.exists())
 
 
 if __name__ == "__main__":
