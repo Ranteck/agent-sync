@@ -1,4 +1,8 @@
 ^README.*
+^CLAUDE\.md$
+^AGENTS\.md$
+^\.serena$
+^\.remember$
 ^tests.*
 ^sync-agents$
 ^\.git$
